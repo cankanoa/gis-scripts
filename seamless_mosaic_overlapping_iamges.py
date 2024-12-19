@@ -164,21 +164,33 @@ def process_global_histogram_matching(input_image_paths_array, output_image_fold
     num_bands = len(datasets[0][0])
     num_images = len(datasets)
 
-    for band_idx in range(num_bands):
-        # ---------- Per band
-        print(f"Processing band {band_idx + 1}/{num_bands}:")
-        band_data = [data[band_idx] for data, _, _, _, _ in datasets]
-        band_masks = [masks[band_idx] for _, _, _, masks, _ in datasets]
-        geo_transforms = [geo for _, geo, _, _, _ in datasets]
-        projections = [proj for _, _, proj, _, _ in datasets]
+    # Extract data and metadata in a structured manner
+    band_data_list = [data for data, _, _, _, _ in datasets]
+    band_masks_list = [masks for _, _, _, masks, _ in datasets]
+    geo_transforms = [geo for _, geo, _, _, _ in datasets]
+    projections = [proj for _, _, proj, _, _ in datasets]
+    nodata_values_list = [nodata for _, _, _, _, nodata in datasets]
 
-        adjustment_params = [] # Will hold final a,b for each image
-        constraint_matrix = [] # Will hold all constraints for this band
-        observed_values_vector = [] # Will hold all observed values (L) for this band
+    # We'll store all adjustment parameters after solving all bands: shape = (num_bands, num_images, 2)
+    all_adjustment_params = np.zeros((num_bands, num_images, 2), dtype=float)
+
+    # Process each band separately (to collect constraints and solve)
+    for band_idx in range(num_bands):
+        print(f"Processing band {band_idx + 1}/{num_bands}:")
+
+        # Extract current band's data and masks for all images
+        band_data = [band_data_list[i][band_idx] for i in range(num_images)]
+        band_masks = [band_masks_list[i][band_idx] for i in range(num_images)]
+
+        constraint_matrix = []
+        observed_values_vector = []
 
         # Gather constraints and observed values for all overlaps in this band
+        printed_overlap_header = False
         for i, (data1, mask1, geo1) in enumerate(zip(band_data, band_masks, geo_transforms)):
-            print('\tOverlaps detected (self vs other):') if not globals().get('overlap_printed') and globals().update({'overlap_printed': True}) is None else None
+            if not printed_overlap_header:
+                print('\tOverlaps detected (self vs other):')
+                printed_overlap_header = True
             print('\t\t', f'Image {i}:')
 
             for j, (data2, mask2, geo2) in enumerate(zip(band_data, band_masks, geo_transforms)):
@@ -187,9 +199,9 @@ def process_global_histogram_matching(input_image_paths_array, output_image_fold
                     if overlap_coords:
                         mean_1, std_1, mean_2, std_2 = calculate_overlap_stats(data1, mask1, data2, mask2, overlap_coords)
 
-                        # Append observed values for this overlap
-                        observed_values_vector.append(0)  # mean constraint target difference
-                        observed_values_vector.append(0)  # std constraint target difference
+                        # Append observed values for this overlap (target differences = 0)
+                        observed_values_vector.append(0)  # mean constraint
+                        observed_values_vector.append(0)  # std constraint
 
                         # Create constraints for mean difference
                         num_params = 2 * num_images
@@ -206,7 +218,7 @@ def process_global_histogram_matching(input_image_paths_array, output_image_fold
                         std_row[2 * j] = -std_2
                         constraint_matrix.append(std_row)
 
-        # Now that all overlaps for this band are collected, convert lists to arrays
+        # Now that all overlaps for this band are collected, solve for adjustment parameters
         if len(constraint_matrix) > 0:
             constraint_matrix = np.array(constraint_matrix)
             observed_values_vector = np.array(observed_values_vector)
@@ -216,32 +228,53 @@ def process_global_histogram_matching(input_image_paths_array, output_image_fold
 
             initial_params = [1.0, 0.0] * num_images
             result = least_squares(residuals, initial_params)
-
             adjustment_params = result.x.reshape(num_images, 2)
-
-            # Apply the adjustments to each image for this band
-            for k, (data, mask) in enumerate(zip(band_data, band_masks)):
-                a, b = adjustment_params[k]
-                adjusted_data = np.where(mask, a * data + b, data)
-                save_adjusted_raster(
-                    adjusted_data=adjusted_data,
-                    geo_transform=geo_transforms[k],
-                    projection=projections[k],
-                    input_image_path=input_image_paths_array[k],
-                    output_image_folder=output_image_folder,
-                    output_global_basename=output_global_basename + str(band_idx),
-                    nodata_value=None
-                )
         else:
             # No constraints or overlaps found for this band
-            print(f"No overlaps found for band {band_idx + 1}. Skipping optimization.")
+            print(f"No overlaps found for band {band_idx + 1}")
+            # Default parameters if no constraints were found: no change (a=1, b=0)
+            adjustment_params = np.tile([1.0, 0.0], (num_images, 1))
 
+        # Store the resulting parameters for this band
+        all_adjustment_params[band_idx] = adjustment_params
+
+        # Debug info
+        np.set_printoptions(suppress=True, precision=3, linewidth=300)
         print(f"Shape: constraint_matrix: {constraint_matrix.shape if isinstance(constraint_matrix, np.ndarray) else 0}, "
-              f"adjustment_params: {adjustment_params.shape if isinstance(adjustment_params, np.ndarray) else 0}, "
+              f"adjustment_params: {adjustment_params.shape}, "
               f"observed_values_vector: {observed_values_vector.shape if isinstance(observed_values_vector, np.ndarray) else 0}")
         print("constraint_matrix:\n", constraint_matrix)
         print('adjustment_params:\n', adjustment_params)
         print('observed_values_vector:\n', observed_values_vector)
+
+    # After processing all bands and determining the best a,b per band per image,
+    # we now apply these parameters to each image for all bands, then save all bands at once.
+    for img_idx in range(num_images):
+        adjusted_bands = []
+        for band_idx in range(num_bands):
+            a, b = all_adjustment_params[band_idx, img_idx]
+            data = band_data_list[img_idx][band_idx]
+            mask = band_masks_list[img_idx][band_idx]
+            adjusted_band = np.where(mask, a * data + b, data)
+            adjusted_bands.append(adjusted_band)
+
+        # Stack all bands for this image
+        adjusted_bands_array = np.stack(adjusted_bands, axis=0)
+
+        # Construct output path
+        input_filename = os.path.basename(input_image_paths_array[img_idx])
+        output_filename = os.path.splitext(input_filename)[0] + output_global_basename + ".tif"
+        output_path = os.path.join(output_image_folder, output_filename)
+
+        # Save the adjusted multi-band image
+        save_multiband_as_geotiff(
+            adjusted_bands_array,
+            geo_transforms[img_idx],
+            projections[img_idx],
+            output_path,
+            nodata_values_list[img_idx]
+        )
+        print(f"Saved adjusted multi-band raster for image {img_idx} to {output_path}")
 
 
 
@@ -287,10 +320,11 @@ def process_global_histogram_matching(input_image_paths_array, output_image_fold
 
 # Call the main function
 input_image_paths_array = [
-    "/Users/kanoalindiwe/Downloads/resources/worldview/Flaash_OrthoFrom20182019Lidar/17DEC08211758-M1BS-016445319010_01_P003_FLAASH_OrthoFrom20182019Lidar.tif",
-    "/Users/kanoalindiwe/Downloads/resources/worldview/Flaash_OrthoFrom20182019Lidar/17DEC08211800-M1BS-016445319010_01_P004_FLAASH_OrthoFrom20182019Lidar.tif",
-    "/Users/kanoalindiwe/Downloads/resources/worldview/Flaash_OrthoFrom20182019Lidar/17DEC08211801-M1BS-016445319010_01_P005_FLAASH_PuuSubset_OrthoFrom20182019Lidar.tif",
+    # "/Users/kanoalindiwe/Downloads/resources/worldview/Flaash_OrthoFrom20182019Lidar/17DEC08211758-M1BS-016445319010_01_P003_FLAASH_OrthoFrom20182019Lidar.tif",
+    # "/Users/kanoalindiwe/Downloads/resources/worldview/Flaash_OrthoFrom20182019Lidar/17DEC08211800-M1BS-016445319010_01_P004_FLAASH_OrthoFrom20182019Lidar.tif",
+    # "/Users/kanoalindiwe/Downloads/resources/worldview/Flaash_OrthoFrom20182019Lidar/17DEC08211801-M1BS-016445319010_01_P005_FLAASH_PuuSubset_OrthoFrom20182019Lidar.tif",
     '/Users/kanoalindiwe/Downloads/resources/worldview/Flaash_OrthoFrom20182019Lidar/17DEC08211840-M1BS-016445318010_01_P015_FLAASH_OrthoFrom20182019Lidar.tif',
+    '/Users/kanoalindiwe/Downloads/resources/worldview/Flaash_OrthoFrom20182019Lidar/17DEC08211841-M1BS-016445318010_01_P016_FLAASH_OrthoFrom20182019Lidar.tif',
     # '/Users/kanoalindiwe/Downloads/temp/3subset.tif',
     # '/Users/kanoalindiwe/Downloads/temp/4subset.tif',
 ]
