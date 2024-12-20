@@ -1,11 +1,16 @@
+import sys
+
 import numpy as np
-from osgeo import gdal, ogr
+from osgeo import gdal
 from scipy.optimize import least_squares
 import os
-import matplotlib.pyplot as plt
-from collections import defaultdict
+np.set_printoptions(
+    suppress=True,
+    precision=3,
+    linewidth=300,
+    formatter={'float_kind':lambda x: f"{x: .3f}"}
+)
 
-# Helper to read raster data
 def read_raster(image_path):
     dataset = gdal.Open(image_path)
     if not dataset:
@@ -22,7 +27,6 @@ def read_raster(image_path):
 
     return data, geo_transform, projection, masks, nodata_values
 
-# Calculate overlapping area geometry between two rasters
 def calculate_overlap_geometry(geo1, mask1, geo2, mask2):
     x_min1 = geo1[0]
     x_max1 = geo1[0] + geo1[1] * mask1.shape[1]
@@ -40,37 +44,32 @@ def calculate_overlap_geometry(geo1, mask1, geo2, mask2):
     y_max_overlap = min(y_max1, y_max2)
 
     if x_min_overlap >= x_max_overlap or y_min_overlap >= y_max_overlap:
-        return None  # No overlap
+        return None
 
     col_min1 = int((x_min_overlap - geo1[0]) / geo1[1])
     col_max1 = int((x_max_overlap - geo1[0]) / geo1[1])
-    row_min1 = int((y_max_overlap - geo1[3]) / geo1[5])  # Flip y_min/y_max for rows
+    row_min1 = int((y_max_overlap - geo1[3]) / geo1[5])
     row_max1 = int((y_min_overlap - geo1[3]) / geo1[5])
 
     col_min2 = int((x_min_overlap - geo2[0]) / geo2[1])
     col_max2 = int((x_max_overlap - geo2[0]) / geo2[1])
-    row_min2 = int((y_max_overlap - geo2[3]) / geo2[5])  # Flip y_min/y_max for rows
+    row_min2 = int((y_max_overlap - geo2[3]) / geo2[5])
     row_max2 = int((y_min_overlap - geo2[3]) / geo2[5])
 
     if row_min1 >= row_max1 or col_min1 >= col_max1 or row_min2 >= row_max2 or col_min2 >= col_max2:
-        print(f"Invalid overlap region: skipping overlap calculation")
+        return None
 
-    # Calculate the minimum overlap shape
     overlap_rows = min(row_max1 - row_min1, row_max2 - row_min2)
     overlap_cols = min(col_max1 - col_min1, col_max2 - col_min2)
 
-    # Adjust bounds to match the minimum shape
     row_max1 = row_min1 + overlap_rows
     row_max2 = row_min2 + overlap_rows
     col_max1 = col_min1 + overlap_cols
     col_max2 = col_min2 + overlap_cols
 
-    return (
-        (row_min1, row_max1, col_min1, col_max1),
-        (row_min2, row_max2, col_min2, col_max2),
-    )
+    return ((row_min1, row_max1, col_min1, col_max1),
+        (row_min2, row_max2, col_min2, col_max2))
 
-# Calculate mean and std for overlap
 def calculate_overlap_stats(data1, mask1, data2, mask2, overlap_coords):
     (r1_min, r1_max, c1_min, c1_max), (r2_min, r2_max, c2_min, c2_max) = overlap_coords
 
@@ -81,53 +80,14 @@ def calculate_overlap_stats(data1, mask1, data2, mask2, overlap_coords):
     overlap_data1 = data1[r1_min:r1_max, c1_min:c1_max][overlap_mask]
     overlap_data2 = data2[r2_min:r2_max, c2_min:c2_max][overlap_mask]
 
-    mean1 = np.mean(overlap_data1)
-    std1 = np.std(overlap_data1)
-    mean2 = np.mean(overlap_data2)
-    std2 = np.std(overlap_data2)
+    mean1 = np.mean(overlap_data1) if overlap_data1.size > 0 else 0
+    std1 = np.std(overlap_data1) if overlap_data1.size > 0 else 0
+    mean2 = np.mean(overlap_data2) if overlap_data2.size > 0 else 0
+    std2 = np.std(overlap_data2) if overlap_data2.size > 0 else 0
 
-    print('\t\t\t',f'size: {len(valid_mask1)}px', 'vs', f'{len(valid_mask2)}px,', 'mean:',f'{mean1:.2f}', 'vs',f'{mean2:.2f},',f'std: {std1:.2f}', 'vs',f'{std2:.2f}')
-    return (mean1, std1, mean2, std2)
+    print('\t', f'size: {overlap_mask.size}px, mean:{mean1:.2f} vs {mean2:.2f}, std:{std1:.2f} vs {std2:.2f}')
+    return mean1, std1, mean2, std2, overlap_mask.size
 
-# Perform least squares adjustment for an image
-from scipy.optimize import least_squares
-import numpy as np
-
-def least_squares_adjustment(mean_1, std_1, mean_2, std_2):
-    """
-    Perform least squares adjustment for a single overlap with given stats.
-    mean_1, std_1: Mean and standard deviation for image 1 in overlap.
-    mean_2, std_2: Mean and standard deviation for image 2 in overlap.
-    """
-    def residuals(params):
-        a, b = params
-        return [
-            a * mean_1 + b - mean_2,  # Mean constraint
-            a * std_1 - std_2         # Variance constraint
-        ]
-
-    # Initial guess for parameters [a, b]
-    initial_params = [1.0, 0.0]
-
-    # Solve using least squares optimization
-    result = least_squares(residuals, initial_params)
-
-    return result.x  # Return [a, b] for the overlap
-
-
-# Adjust image based on calculated parameters
-def adjust_image(data, mask, a, b):
-    adjusted_data = np.copy(data)
-    adjusted_data[mask] = a * data[mask] + b # The adjustment math
-
-    return adjusted_data
-
-def calculate_mean_and_std(data):
-    mean = np.mean(data)
-    std = np.std(data)
-    return mean, std
-
-# Save as GeoTIFF
 def save_multiband_as_geotiff(array, geo_transform, projection, path, nodata_values):
     driver = gdal.GetDriverByName("GTiff")
     num_bands, rows, cols = array.shape
@@ -139,86 +99,147 @@ def save_multiband_as_geotiff(array, geo_transform, projection, path, nodata_val
         out_band = out_ds.GetRasterBand(i + 1)
         out_band.WriteArray(array[i])
         if nodata_values and nodata_values[i] is not None:
-            out_band.SetNoDataValue(nodata_values[i])  # Set the NoData value for this band
+            out_band.SetNoDataValue(nodata_values[i])
 
     out_ds.FlushCache()
 
-def save_adjusted_raster(adjusted_data, geo_transform, projection, input_image_path, output_image_folder, output_global_basename, nodata_value=None):
-    import os
+def merge_rasters(input_array, output_image_folder, output_file_name="merge.tif"):
 
-    # Extract the input file name without extension
-    input_filename = os.path.basename(input_image_path)
-    output_filename = os.path.splitext(input_filename)[0] + output_global_basename + ".tif"
-    output_path = os.path.join(output_image_folder, output_filename)
+    output_path = os.path.join(output_image_folder, output_file_name)
+    input_datasets = [gdal.Open(path) for path in input_array if gdal.Open(path)]
+    gdal.Warp(
+        output_path,
+        input_datasets,
+        format='GTiff',
+    )
 
-    # Prepare single-band array for saving
-    single_band_array = adjusted_data[np.newaxis, :, :]  # Add a new axis for single-band
-
-    # Save the adjusted raster
-    save_multiband_as_geotiff(single_band_array, geo_transform, projection, output_path, [nodata_value])
-
-    print(f"Saved adjusted raster to {output_path}")
+    print(f"Merged raster saved to: {output_path}")
 
 def process_global_histogram_matching(input_image_paths_array, output_image_folder, output_global_basename):
+# ---------------------------------------- Get Images
     datasets = [read_raster(image_path) for image_path in input_image_paths_array]
     num_bands = len(datasets[0][0])
     num_images = len(datasets)
+    overlap_pairs = []
 
-    # Extract data and metadata in a structured manner
     band_data_list = [data for data, _, _, _, _ in datasets]
     band_masks_list = [masks for _, _, _, masks, _ in datasets]
     geo_transforms = [geo for _, geo, _, _, _ in datasets]
     projections = [proj for _, _, proj, _, _ in datasets]
     nodata_values_list = [nodata for _, _, _, _, nodata in datasets]
 
-    # We'll store all adjustment parameters after solving all bands: shape = (num_bands, num_images, 2)
-    all_adjustment_params = np.zeros((num_bands, num_images, 2), dtype=float)
+    # Compute original means and stds per band per image
+    original_means = np.zeros((num_bands, num_images), dtype=float)
+    original_stds = np.zeros((num_bands, num_images), dtype=float)
+# ---------------------------------------- Get statistics
+    for img_idx, (data, _, _, masks, _) in enumerate(datasets):
+        for band_idx in range(num_bands):
+            band_data = data[band_idx]
+            band_mask = masks[band_idx]
+            valid_pixels = band_data[band_mask]
+            Mj = np.mean(valid_pixels)
+            Vj = np.std(valid_pixels)
+            original_means[band_idx, img_idx] = Mj
+            original_stds[band_idx, img_idx] = Vj
 
-    # Process each band separately (to collect constraints and solve)
+    all_adjustment_params = np.zeros((num_bands, 2 * num_images, 1), dtype=float)
+
     for band_idx in range(num_bands):
-        print(f"Processing band {band_idx + 1}/{num_bands}:")
-
-        # Extract current band's data and masks for all images
+        print('--------------------')
+        print(f"Processing band {band_idx+1}/{num_bands}:")
+        overlap_pairs = []
         band_data = [band_data_list[i][band_idx] for i in range(num_images)]
         band_masks = [band_masks_list[i][band_idx] for i in range(num_images)]
 
         constraint_matrix = []
         observed_values_vector = []
+        total_overlap_pixels = 0
 
-        # Gather constraints and observed values for all overlaps in this band
         printed_overlap_header = False
+
+        # Gather overlap constraints
         for i, (data1, mask1, geo1) in enumerate(zip(band_data, band_masks, geo_transforms)):
             if not printed_overlap_header:
-                print('\tOverlaps detected (self vs other):')
+                print('Overlaps detected:')
                 printed_overlap_header = True
-            print('\t\t', f'Image {i}:')
 
             for j, (data2, mask2, geo2) in enumerate(zip(band_data, band_masks, geo_transforms)):
-                if i != j:
+                if i < j:  # process each pair once (i<j)
                     overlap_coords = calculate_overlap_geometry(geo1, mask1, geo2, mask2)
                     if overlap_coords:
-                        mean_1, std_1, mean_2, std_2 = calculate_overlap_stats(data1, mask1, data2, mask2, overlap_coords)
+                        overlap_pairs.append((i, j))
+                        print( f"\tOverlap({i}-{j}):", end="")
+                        mean_1, std_1, mean_2, std_2, overlap_size = calculate_overlap_stats(data1, mask1, data2, mask2, overlap_coords)
+                        total_overlap_pixels += overlap_size
 
-                        # Append observed values for this overlap (target differences = 0)
-                        observed_values_vector.append(0)  # mean constraint
-                        observed_values_vector.append(0)  # std constraint
-
-                        # Create constraints for mean difference
+                        # mean difference: a_i * M_i + b_i - (a_j * M_j + b_j) = 0
+                        # std difference: a_i * V_i - a_j * V_j = 0
                         num_params = 2 * num_images
-                        mean_row = [0] * num_params
-                        mean_row[2 * i] = mean_1
-                        mean_row[2 * i + 1] = 1
-                        mean_row[2 * j] = -mean_2
-                        mean_row[2 * j + 1] = -1
-                        constraint_matrix.append(mean_row)
 
-                        # Create constraints for std difference
-                        std_row = [0] * num_params
-                        std_row[2 * i] = std_1
-                        std_row[2 * j] = -std_2
+                        # mean difference row
+                        mean_row = [0]*num_params
+                        mean_row[2*i] = mean_1
+                        mean_row[2*i+1] = 1
+                        mean_row[2*j] = -mean_2
+                        mean_row[2*j+1] = -1
+
+                        # std difference row
+                        std_row = [0]*num_params
+                        std_row[2*i] = std_1
+                        std_row[2*j] = -std_2
+
+                        # Apply overlap weight (p_ij = s_ij)
+                        mean_row = [val * overlap_size for val in mean_row]
+                        std_row = [val * overlap_size for val in std_row]
+
+                        # Observed values (targets) are 0 for these constraints
+                        observed_values_vector.append(0)  # mean diff
+                        observed_values_vector.append(0)  # std diff
+
+                        constraint_matrix.append(mean_row)
                         constraint_matrix.append(std_row)
 
-        # Now that all overlaps for this band are collected, solve for adjustment parameters
+        # Compute p_jj
+        if total_overlap_pixels == 0:
+            pjj = 1.0
+        else:
+            pjj = total_overlap_pixels / (2.0 * num_images)
+
+        # Add mean and std constraints for each image to keep it close to original stats
+        # mean constraint: a_j*M_j + b_j = M_j  => a_j*M_j + b_j - M_j = 0
+        # std constraint: a_j*V_j = V_j        => a_j*V_j - V_j = 0
+
+        for img_idx in range(num_images):
+            Mj = original_means[band_idx, img_idx]
+            Vj = original_stds[band_idx, img_idx]
+
+            # mean constraint row
+            mean_row = [0]*(2*num_images)
+            mean_row[2*img_idx] = Mj
+            mean_row[2*img_idx+1] = 1.0
+            # we want: a_j*M_j + b_j - M_j = 0 => observed = M_j
+            mean_obs = Mj
+
+            # std constraint row
+            std_row = [0]*(2*num_images)
+            std_row[2*img_idx] = Vj
+            # we want: a_j*V_j - V_j = 0 => observed = V_j
+            std_obs = Vj
+
+            # Weight these rows by p_jj
+            mean_row = [val * pjj for val in mean_row]
+            std_row = [val * pjj for val in std_row]
+
+            mean_obs *= pjj
+            std_obs *= pjj
+
+            constraint_matrix.append(mean_row)
+            observed_values_vector = np.append(observed_values_vector, mean_obs)
+
+            constraint_matrix.append(std_row)
+            observed_values_vector = np.append(observed_values_vector, std_obs)
+
+# ---------------------------------------- Model building
         if len(constraint_matrix) > 0:
             constraint_matrix = np.array(constraint_matrix)
             observed_values_vector = np.array(observed_values_vector)
@@ -228,45 +249,76 @@ def process_global_histogram_matching(input_image_paths_array, output_image_fold
 
             initial_params = [1.0, 0.0] * num_images
             result = least_squares(residuals, initial_params)
-            adjustment_params = result.x.reshape(num_images, 2)
+            adjustment_params = result.x.reshape((2 * num_images, 1))
         else:
-            # No constraints or overlaps found for this band
-            print(f"No overlaps found for band {band_idx + 1}")
-            # Default parameters if no constraints were found: no change (a=1, b=0)
+            print(f"No overlaps found for band {band_idx+1}")
             adjustment_params = np.tile([1.0, 0.0], (num_images, 1))
 
-        # Store the resulting parameters for this band
         all_adjustment_params[band_idx] = adjustment_params
 
-        # Debug info
-        np.set_printoptions(suppress=True, precision=3, linewidth=300)
-        print(f"Shape: constraint_matrix: {constraint_matrix.shape if isinstance(constraint_matrix, np.ndarray) else 0}, "
-              f"adjustment_params: {adjustment_params.shape}, "
-              f"observed_values_vector: {observed_values_vector.shape if isinstance(observed_values_vector, np.ndarray) else 0}")
-        print("constraint_matrix:\n", constraint_matrix)
-        print('adjustment_params:\n', adjustment_params)
-        print('observed_values_vector:\n', observed_values_vector)
+# ---------------------------------------- Print info
+        print(f"Shape: constraint_matrix: {constraint_matrix.shape}, adjustment_params: {adjustment_params.shape}, observed_values_vector: {observed_values_vector.shape}")
+        print("constraint_matrix (labeling may be wrong):")
+        # np.savetxt(sys.stdout, constraint_matrix, fmt="%16.3f")
 
-    # After processing all bands and determining the best a,b per band per image,
-    # we now apply these parameters to each image for all bands, then save all bands at once.
+        row_labels = []
+        overlap_count = len(overlap_pairs)  # You must have recorded overlaps somewhere
+
+        # Add two labels per overlap pair
+        for (i, j) in overlap_pairs:
+            row_labels.append(f"Overlap({i}-{j}) Mean Diff")
+            row_labels.append(f"Overlap({i}-{j}) Std Diff")
+
+        # Then add two labels per image for mean/std constraints
+        for img_idx in range(num_images):
+            row_labels.append(f"Image {img_idx} Mean Cnstr")
+            row_labels.append(f"Image {img_idx} Std Cnstr")
+
+        # Now row_labels should have exactly constraint_matrix.shape[0] elements
+
+        # Print column labels as before
+        num_params = 2 * num_images
+        col_labels = []
+        for i in range(num_images):
+            col_labels.append(f"a{i}")
+            col_labels.append(f"b{i}")
+
+        header = " " * 24  # extra space for row label
+        for lbl in col_labels:
+            header += f"{lbl:>18}"
+        print(header)
+
+        # Print each row with its label
+        for row_label, row in zip(row_labels, constraint_matrix):
+            line = f"{row_label:>24}"  # adjust the width as needed
+            for val in row:
+                line += f"{val:18.3f}"
+            print(line)
+
+        print('adjustment_params:')
+        np.savetxt(sys.stdout, adjustment_params, fmt="%18.3f")
+        print('observed_values_vector:')
+        np.savetxt(sys.stdout, observed_values_vector, fmt="%18.3f")
+        # ---------------------------------------- End print info
+
+# ---------------------------------------- Apply adjustments
+    output_path_array = []
     for img_idx in range(num_images):
         adjusted_bands = []
         for band_idx in range(num_bands):
-            a, b = all_adjustment_params[band_idx, img_idx]
+            a = all_adjustment_params[band_idx, 2 * img_idx, 0]
+            b = all_adjustment_params[band_idx, 2 * img_idx + 1, 0]
             data = band_data_list[img_idx][band_idx]
             mask = band_masks_list[img_idx][band_idx]
             adjusted_band = np.where(mask, a * data + b, data)
             adjusted_bands.append(adjusted_band)
 
-        # Stack all bands for this image
         adjusted_bands_array = np.stack(adjusted_bands, axis=0)
-
-        # Construct output path
         input_filename = os.path.basename(input_image_paths_array[img_idx])
         output_filename = os.path.splitext(input_filename)[0] + output_global_basename + ".tif"
         output_path = os.path.join(output_image_folder, output_filename)
+        output_path_array.append(output_path)
 
-        # Save the adjusted multi-band image
         save_multiband_as_geotiff(
             adjusted_bands_array,
             geo_transforms[img_idx],
@@ -275,54 +327,15 @@ def process_global_histogram_matching(input_image_paths_array, output_image_fold
             nodata_values_list[img_idx]
         )
         print(f"Saved adjusted multi-band raster for image {img_idx} to {output_path}")
+# ---------------------------------------- Merge rasters
+    merge_rasters(output_path_array, output_image_folder, output_file_name="merging.tif")
 
 
-
-    #
-    #     # Adjust images for this band
-    #     adjusted_bands = []
-    #     for i, (data, mask, geo, proj, stats_for_print) in enumerate(zip(band_data, band_masks, geo_transforms, projections, all_stats)):
-    #         a, b = adjustment_params[i]
-    #         print('\tWhole adjustment stats (original vs adjusted):') if not globals().get('overlap_adjust_printed') and globals().update({'overlap_adjust_printed': True}) is None else None
-    #         adjusted_band = adjust_image(data, mask, a, b)
-    #         adjusted_bands.append(adjusted_band)
-    #         datasets[i][0][band_idx] = adjusted_band  # Update band data
-    #
-    #         # Prints
-    #         stats_for_print
-    #         print('\t\t',f'Image {i}: ')
-    #         original_mean, original_std = calculate_mean_and_std(data[mask])
-    #         adjusted_mean, adjusted_std = calculate_mean_and_std(adjusted_band[mask])
-    #         print(f'\t\t\tsize: {len(data[mask])}px', 'vs', f'{len(adjusted_band[mask])}px,', 'mean:',f'{original_mean:.2f}', 'vs',f'{adjusted_mean:.2f},',f'std: {original_std:.2f}', 'vs',f'{adjusted_std:.2f}')
-    #
-    #     # Recalculate overlap stats for adjusted images
-    #     print("\tOverlap adjustment stats (original vs adjusted):")
-    #     for i, (data1, mask1, geo1) in enumerate(zip(adjusted_bands, band_masks, geo_transforms)):
-    #         print(f'\t\tImage {i}:')
-    #         for j, (data2, mask2, geo2) in enumerate(zip(adjusted_bands, band_masks, geo_transforms)):
-    #             if i != j:
-    #                 overlap_coords = calculate_overlap_geometry(geo1, mask1, geo2, mask2)
-    #                 if overlap_coords:
-    #                     calculate_overlap_stats(data1, mask1, data2, mask2, overlap_coords)
-    #
-    #     globals()['overlap_adjust_printed'] = None
-    #     globals()['overlap_printed'] = None
-    #
-    # # Save the adjusted multi-band images
-    # for i, (data, geo, proj, _, nodata_values) in enumerate(datasets):
-    #     # Stack adjusted bands
-    #     adjusted_data = np.stack(data, axis=0)
-    #     input_basename = os.path.basename(input_image_paths_array[i])
-    #     output_filename = f"{os.path.splitext(input_basename)[0]}{output_global_basename}.tif"
-    #     output_path = os.path.join(output_image_folder, output_filename)
-    #
-    #     save_multiband_as_geotiff(adjusted_data, geo, proj, output_path, nodata_values)
-
-# Call the main function
+# ---------------------------------------- Call function
 input_image_paths_array = [
-    # "/Users/kanoalindiwe/Downloads/resources/worldview/Flaash_OrthoFrom20182019Lidar/17DEC08211758-M1BS-016445319010_01_P003_FLAASH_OrthoFrom20182019Lidar.tif",
-    # "/Users/kanoalindiwe/Downloads/resources/worldview/Flaash_OrthoFrom20182019Lidar/17DEC08211800-M1BS-016445319010_01_P004_FLAASH_OrthoFrom20182019Lidar.tif",
-    # "/Users/kanoalindiwe/Downloads/resources/worldview/Flaash_OrthoFrom20182019Lidar/17DEC08211801-M1BS-016445319010_01_P005_FLAASH_PuuSubset_OrthoFrom20182019Lidar.tif",
+    "/Users/kanoalindiwe/Downloads/resources/worldview/Flaash_OrthoFrom20182019Lidar/17DEC08211758-M1BS-016445319010_01_P003_FLAASH_OrthoFrom20182019Lidar.tif",
+    "/Users/kanoalindiwe/Downloads/resources/worldview/Flaash_OrthoFrom20182019Lidar/17DEC08211800-M1BS-016445319010_01_P004_FLAASH_OrthoFrom20182019Lidar.tif",
+    "/Users/kanoalindiwe/Downloads/resources/worldview/Flaash_OrthoFrom20182019Lidar/17DEC08211801-M1BS-016445319010_01_P005_FLAASH_PuuSubset_OrthoFrom20182019Lidar.tif",
     '/Users/kanoalindiwe/Downloads/resources/worldview/Flaash_OrthoFrom20182019Lidar/17DEC08211840-M1BS-016445318010_01_P015_FLAASH_OrthoFrom20182019Lidar.tif',
     '/Users/kanoalindiwe/Downloads/resources/worldview/Flaash_OrthoFrom20182019Lidar/17DEC08211841-M1BS-016445318010_01_P016_FLAASH_OrthoFrom20182019Lidar.tif',
     # '/Users/kanoalindiwe/Downloads/temp/3subset.tif',
@@ -331,9 +344,6 @@ input_image_paths_array = [
 output_image_folder = "/Users/kanoalindiwe/Downloads/temp/"
 output_global_basename = "_GlobalHistMatch"
 process_global_histogram_matching(input_image_paths_array, output_image_folder, output_global_basename)
-
-
-
 
 
 
