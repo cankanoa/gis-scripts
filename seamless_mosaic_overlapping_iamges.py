@@ -115,8 +115,9 @@ def merge_rasters(input_array, output_image_folder, output_file_name="merge.tif"
 
     print(f"Merged raster saved to: {output_path}")
 
-def process_global_histogram_matching(input_image_paths_array, output_image_folder, output_global_basename):
+def process_global_histogram_matching(input_image_paths_array, output_image_folder, output_global_basename, custom_mean_factor, custom_std_factor):
 # ---------------------------------------- Get Images
+    print('-------------------- Opening images')
     datasets = [read_raster(image_path) for image_path in input_image_paths_array]
     num_bands = len(datasets[0][0])
     num_images = len(datasets)
@@ -132,6 +133,7 @@ def process_global_histogram_matching(input_image_paths_array, output_image_fold
     original_means = np.zeros((num_bands, num_images), dtype=float)
     original_stds = np.zeros((num_bands, num_images), dtype=float)
 # ---------------------------------------- Get statistics
+    print('-------------------- Calculating statistics')
     for img_idx, (data, _, _, masks, _) in enumerate(datasets):
         for band_idx in range(num_bands):
             band_data = data[band_idx]
@@ -145,7 +147,6 @@ def process_global_histogram_matching(input_image_paths_array, output_image_fold
     all_adjustment_params = np.zeros((num_bands, 2 * num_images, 1), dtype=float)
 
     for band_idx in range(num_bands):
-        print('--------------------')
         print(f"Processing band {band_idx+1}/{num_bands}:")
         overlap_pairs = []
         band_data = [band_data_list[i][band_idx] for i in range(num_images)]
@@ -189,8 +190,8 @@ def process_global_histogram_matching(input_image_paths_array, output_image_fold
                         std_row[2*j] = -std_2
 
                         # Apply overlap weight (p_ij = s_ij)
-                        mean_row = [val * overlap_size for val in mean_row]
-                        std_row = [val * overlap_size for val in std_row]
+                        mean_row = [val * overlap_size * custom_mean_factor for val in mean_row]
+                        std_row = [val * overlap_size * custom_std_factor for val in std_row]
 
                         # Observed values (targets) are 0 for these constraints
                         observed_values_vector.append(0)  # mean diff
@@ -258,7 +259,7 @@ def process_global_histogram_matching(input_image_paths_array, output_image_fold
 
 # ---------------------------------------- Print info
         print(f"Shape: constraint_matrix: {constraint_matrix.shape}, adjustment_params: {adjustment_params.shape}, observed_values_vector: {observed_values_vector.shape}")
-        print("constraint_matrix (labeling may be wrong):")
+        print("constraint_matrix with labels:")
         # np.savetxt(sys.stdout, constraint_matrix, fmt="%16.3f")
 
         row_labels = []
@@ -302,6 +303,7 @@ def process_global_histogram_matching(input_image_paths_array, output_image_fold
         # ---------------------------------------- End print info
 
 # ---------------------------------------- Apply adjustments
+    print('-------------------- Apply adjustments and saving results')
     output_path_array = []
     for img_idx in range(num_images):
         adjusted_bands = []
@@ -326,24 +328,33 @@ def process_global_histogram_matching(input_image_paths_array, output_image_fold
             output_path,
             nodata_values_list[img_idx]
         )
-        print(f"Saved adjusted multi-band raster for image {img_idx} to {output_path}")
+        print(f"Saved file {img_idx} to: {output_path}")
 # ---------------------------------------- Merge rasters
-    merge_rasters(output_path_array, output_image_folder, output_file_name="merging.tif")
+    print('-------------------- Merging rasters and saving result')
+    merge_rasters(output_path_array, output_image_folder, output_file_name="mergingMeanPuuSubset.tif")
 
 
 # ---------------------------------------- Call function
 input_image_paths_array = [
-    "/Users/kanoalindiwe/Downloads/resources/worldview/Flaash_OrthoFrom20182019Lidar/17DEC08211758-M1BS-016445319010_01_P003_FLAASH_OrthoFrom20182019Lidar.tif",
-    "/Users/kanoalindiwe/Downloads/resources/worldview/Flaash_OrthoFrom20182019Lidar/17DEC08211800-M1BS-016445319010_01_P004_FLAASH_OrthoFrom20182019Lidar.tif",
-    "/Users/kanoalindiwe/Downloads/resources/worldview/Flaash_OrthoFrom20182019Lidar/17DEC08211801-M1BS-016445319010_01_P005_FLAASH_PuuSubset_OrthoFrom20182019Lidar.tif",
-    '/Users/kanoalindiwe/Downloads/resources/worldview/Flaash_OrthoFrom20182019Lidar/17DEC08211840-M1BS-016445318010_01_P015_FLAASH_OrthoFrom20182019Lidar.tif',
-    '/Users/kanoalindiwe/Downloads/resources/worldview/Flaash_OrthoFrom20182019Lidar/17DEC08211841-M1BS-016445318010_01_P016_FLAASH_OrthoFrom20182019Lidar.tif',
+    # "/Users/kanoalindiwe/Downloads/resources/worldview/Flaash_OrthoFrom20182019Lidar/17DEC08211758-M1BS-016445319010_01_P003_FLAASH_OrthoFrom20182019Lidar.tif",
+    # "/Users/kanoalindiwe/Downloads/resources/worldview/Flaash_OrthoFrom20182019Lidar/17DEC08211800-M1BS-016445319010_01_P004_FLAASH_OrthoFrom20182019Lidar.tif",
+    # "/Users/kanoalindiwe/Downloads/resources/worldview/Flaash_OrthoFrom20182019Lidar/17DEC08211801-M1BS-016445319010_01_P005_FLAASH_PuuSubset_OrthoFrom20182019Lidar.tif",
+    # '/Users/kanoalindiwe/Downloads/resources/worldview/Flaash_OrthoFrom20182019Lidar/17DEC08211840-M1BS-016445318010_01_P015_FLAASH_OrthoFrom20182019Lidar.tif',
+    # '/Users/kanoalindiwe/Downloads/resources/worldview/Flaash_OrthoFrom20182019Lidar/17DEC08211841-M1BS-016445318010_01_P016_FLAASH_OrthoFrom20182019Lidar.tif',
     # '/Users/kanoalindiwe/Downloads/temp/3subset.tif',
     # '/Users/kanoalindiwe/Downloads/temp/4subset.tif',
+    '/Users/kanoalindiwe/Downloads/temp/ClippedToPuu/ClippedToPuu3.tif',
+    '/Users/kanoalindiwe/Downloads/temp/ClippedToPuu/ClippedToPuu4.tif',
+    '/Users/kanoalindiwe/Downloads/temp/ClippedToPuu/ClippedToPuu5.tif',
+    '/Users/kanoalindiwe/Downloads/temp/ClippedToPuu/ClippedToPuu15.tif',
+    '/Users/kanoalindiwe/Downloads/temp/ClippedToPuu/ClippedToPuu16.tif',
+
 ]
 output_image_folder = "/Users/kanoalindiwe/Downloads/temp/"
-output_global_basename = "_GlobalHistMatch"
-process_global_histogram_matching(input_image_paths_array, output_image_folder, output_global_basename)
+output_global_basename = "_GlobalHistMatch_PuuSubset"
+custom_mean_factor = 1 # Defualt 1
+custom_std_factor = 1 # Defualt 1
+process_global_histogram_matching(input_image_paths_array, output_image_folder, output_global_basename, custom_mean_factor, custom_std_factor)
 
 
 
