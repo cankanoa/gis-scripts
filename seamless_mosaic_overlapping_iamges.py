@@ -115,12 +115,13 @@ def merge_rasters(input_array, output_image_folder, output_file_name="merge.tif"
 
     print(f"Merged raster saved to: {output_path}")
 
-def process_global_histogram_matching(input_image_paths_array, output_image_folder, output_global_basename, custom_mean_factor, custom_std_factor):
+def process_global_histogram_matching(input_image_paths_array, output_image_folder, output_global_basename, custom_mean_factor, custom_std_factor, num_bands):
 # ---------------------------------------- Get Images
     print('-------------------- Opening images')
     datasets = [read_raster(image_path) for image_path in input_image_paths_array]
-    num_bands = len(datasets[0][0])
-    num_images = len(datasets)
+    # num_bands = len(datasets[0][0])
+    num_bands = num_bands
+    num_images = len(input_image_paths_array)
     overlap_pairs = []
 
     band_data_list = [data for data, _, _, _, _ in datasets]
@@ -331,7 +332,7 @@ def process_global_histogram_matching(input_image_paths_array, output_image_fold
         print(f"Saved file {img_idx} to: {output_path}")
 # ---------------------------------------- Merge rasters
     print('-------------------- Merging rasters and saving result')
-    merge_rasters(output_path_array, output_image_folder, output_file_name="mergingMeanPuuSubset.tif")
+    merge_rasters(output_path_array, output_image_folder, output_file_name=f"Merged{output_global_basename}.tif")
 
 
 # ---------------------------------------- Call function
@@ -343,18 +344,18 @@ input_image_paths_array = [
     # '/Users/kanoalindiwe/Downloads/resources/worldview/Flaash_OrthoFrom20182019Lidar/17DEC08211841-M1BS-016445318010_01_P016_FLAASH_OrthoFrom20182019Lidar.tif',
     # '/Users/kanoalindiwe/Downloads/temp/3subset.tif',
     # '/Users/kanoalindiwe/Downloads/temp/4subset.tif',
-    '/Users/kanoalindiwe/Downloads/temp/ClippedToPuu/ClippedToPuu3.tif',
-    '/Users/kanoalindiwe/Downloads/temp/ClippedToPuu/ClippedToPuu4.tif',
-    '/Users/kanoalindiwe/Downloads/temp/ClippedToPuu/ClippedToPuu5.tif',
-    '/Users/kanoalindiwe/Downloads/temp/ClippedToPuu/ClippedToPuu15.tif',
-    '/Users/kanoalindiwe/Downloads/temp/ClippedToPuu/ClippedToPuu16.tif',
+    '/Users/kanoalindiwe/Downloads/temp/ClippedToPuu3.tif',
+    '/Users/kanoalindiwe/Downloads/temp/ClippedToPuu4.tif',
+    '/Users/kanoalindiwe/Downloads/temp/ClippedToPuu5.tif',
+    '/Users/kanoalindiwe/Downloads/temp/ClippedToPuu15.tif',
+    '/Users/kanoalindiwe/Downloads/temp/ClippedToPuu16.tif',
 
 ]
 output_image_folder = "/Users/kanoalindiwe/Downloads/temp/"
-output_global_basename = "_GlobalHistMatch_PuuSubset"
+output_global_basename = "_GlobalHistMatch_ClippedToPuu"
 custom_mean_factor = 1 # Defualt 1
 custom_std_factor = 1 # Defualt 1
-process_global_histogram_matching(input_image_paths_array, output_image_folder, output_global_basename, custom_mean_factor, custom_std_factor)
+process_global_histogram_matching(input_image_paths_array, output_image_folder, output_global_basename, custom_mean_factor, custom_std_factor, num_bands=8)
 
 
 
