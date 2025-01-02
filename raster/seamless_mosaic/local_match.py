@@ -3,13 +3,11 @@ import numpy as np
 from osgeo import gdal
 from math import log, floor
 from typing import Tuple, List, Optional
-# from seamless_mosaic_overlapping_iamges import get_image_metadata, merge_rasters
 
 ##############################################################################
-# HELPER FUNCTIONS (unchanged except for the gamma bounds in apply_local_correction)
+# HELPER FUNCTIONS (unchanged except for the vectorization in compute_local_distribution_map)
 ##############################################################################
 def merge_rasters(input_array, output_image_folder, output_file_name="merge.tif"):
-
     output_path = os.path.join(output_image_folder, output_file_name)
     input_datasets = [gdal.Open(path) for path in input_array if gdal.Open(path)]
     gdal.Warp(
@@ -17,8 +15,8 @@ def merge_rasters(input_array, output_image_folder, output_file_name="merge.tif"
         input_datasets,
         format='GTiff',
     )
-
     print(f"Merged raster saved to: {output_path}")
+
 def get_image_metadata(input_image_path):
     """
 Get metadata of a TIFF image, including transform, projection, nodata, and bounds.
@@ -57,7 +55,6 @@ tuple: A tuple containing (transform, projection, nodata, bounds).
                 bounds = None
 
             dataset = None  # Close the dataset
-
             return transform, projection, nodata, bounds
         else:
             print(f"Could not open the file: {input_image_path}")
@@ -67,8 +64,8 @@ tuple: A tuple containing (transform, projection, nodata, bounds).
 
 def get_bounding_rectangle(image_paths: List[str]):
     """
-    Computes the minimum bounding rectangle (x_min, y_min, x_max, y_max)
-    that covers all input images.
+Computes the minimum bounding rectangle (x_min, y_min, x_max, y_max)
+that covers all input images.
     """
     x_mins, y_mins, x_maxs, y_maxs = [], [], [], []
 
@@ -82,16 +79,15 @@ def get_bounding_rectangle(image_paths: List[str]):
 
     return (min(x_mins), min(y_mins), max(x_maxs), max(y_maxs))
 
-
 def compute_mosaic_coefficient_of_variation(
         image_paths: List[str],
         band_index: int = 1,
         nodata_value: float = None
 ) -> float:
     """
-    Computes the mosaic-level coefficient of variation for the specified band
-    across all images. This is a simplified example that loads entire bands.
-    For truly large imagery, adapt to read partial blocks/tiles at a time.
+Computes the mosaic-level coefficient of variation for the specified band
+across all images. This is a simplified example that loads entire bands.
+For truly large imagery, adapt to read partial blocks/tiles at a time.
     """
     all_pixels = []
 
@@ -118,17 +114,16 @@ def compute_mosaic_coefficient_of_variation(
 
     return std_val / mean_val
 
-
 def compute_block_size(
         catar: float,
         base_block_size: Tuple[int, int] = (10, 10),
         caref: float = 45.0/125.0
 ) -> Tuple[int, int]:
     """
-    Computes the grid size (M, N) using Eqs. (38) and (39) from the paper.
-    M = r * m
-    N = r * n
-    r = CAtar / CAref
+Computes the grid size (M, N) using Eqs. (38) and (39) from the paper.
+M = r * m
+N = r * n
+r = CAtar / CAref
     """
     if caref == 0:
         r = 1.0
@@ -138,7 +133,6 @@ def compute_block_size(
     M = max(1, int(round(r * m)))
     N = max(1, int(round(r * n)))
     return (M, N)
-
 
 def compute_reference_distribution_map(
         image_paths: List[str],
@@ -216,7 +210,10 @@ Output shape = (M, N, num_bands).
     block_map[valid_counts] = sum_map[valid_counts] / count_map[valid_counts]
     return block_map
 
-
+##############################################################################
+# Updated function: compute_local_distribution_map
+# Vectorized accumulation instead of per-pixel loop
+##############################################################################
 def compute_local_distribution_map(
         image_path: str,
         bounding_rect: Tuple[float, float, float, float],
@@ -226,7 +223,8 @@ def compute_local_distribution_map(
         nodata_value: float = None
 ) -> np.ndarray:
     """
-    For a single image, computes the (M x N x num_bands) block-level mean.
+For a single image, computes the (M x N x num_bands) block-level mean
+without looping over each pixel. Uses vectorized accumulation with np.add.at.
     """
     x_min, y_min, x_max, y_max = bounding_rect
     local_map = np.full((M, N, num_bands), np.nan, dtype=np.float64)
@@ -239,96 +237,80 @@ def compute_local_distribution_map(
         return local_map
 
     gt = ds.GetGeoTransform()
-    nX = ds.RasterXSize
-    nY = ds.RasterYSize
+    nX, nY = ds.RasterXSize, ds.RasterYSize
     block_width  = (x_max - x_min) / N
     block_height = (y_max - y_min) / M
 
+    # Precompute geo-coordinates for all pixel centers
+    col_index = np.arange(nX) + 0.5
+    row_index = np.arange(nY) + 0.5
+    Xgeo = gt[0] + col_index * gt[1]
+    Ygeo = gt[3] + row_index * gt[5]
+    Xgeo_2d, Ygeo_2d = np.meshgrid(Xgeo, Ygeo)
+
     for b in range(num_bands):
         band = ds.GetRasterBand(b+1)
-        arr  = band.ReadAsArray().astype(np.float64)
+        arr = band.ReadAsArray().astype(np.float64)
 
         if nodata_value is not None:
-            nodata_mask = (arr == nodata_value)
+            valid_mask = (arr != nodata_value)
         else:
-            nodata_mask = np.full(arr.shape, False, dtype=bool)
-        valid_mask = ~nodata_mask
-
-        col_index = np.arange(nX)
-        row_index = np.arange(nY)
-        Xgeo = gt[0] + (col_index + 0.5)*gt[1]
-        Ygeo = gt[3] + (row_index + 0.5)*gt[5]
-        Xgeo_2d, Ygeo_2d = np.meshgrid(Xgeo, Ygeo)
+            valid_mask = np.ones_like(arr, dtype=bool)
 
         valid_inds = np.where(valid_mask)
         pix_vals = arr[valid_inds]
         pix_x = Xgeo_2d[valid_inds]
         pix_y = Ygeo_2d[valid_inds]
 
-        block_cols = np.floor((pix_x - x_min)/block_width).astype(int)
-        block_rows = np.floor((y_max - pix_y)/block_height).astype(int)
+        # Compute block indices in a vectorized manner
+        block_cols = ((pix_x - x_min) / block_width).astype(int)
+        block_rows = ((y_max - pix_y) / block_height).astype(int)
 
+        # Clip to stay in valid index range
         in_bounds = (
             (block_cols >= 0) & (block_cols < N) &
             (block_rows >= 0) & (block_rows < M)
         )
-
         block_cols = block_cols[in_bounds]
         block_rows = block_rows[in_bounds]
         pix_vals   = pix_vals[in_bounds]
 
-        for bc, br, val in zip(block_cols, block_rows, pix_vals):
-            sum_map[br, bc, b]   += val
-            count_map[br, bc, b] += 1
+        # Vectorized accumulation
+        np.add.at(sum_map[:, :, b], (block_rows, block_cols), pix_vals)
+        np.add.at(count_map[:, :, b], (block_rows, block_cols), 1)
 
     ds = None
 
-    for b in range(num_bands):
-        valid_counts = (count_map[:, :, b] > 0)
-        local_map[valid_counts, b] = (
-            sum_map[valid_counts, b] / count_map[valid_counts, b]
-        )
-
+    # Compute mean where count > 0
+    valid_counts = (count_map > 0)
+    local_map[valid_counts] = sum_map[valid_counts] / count_map[valid_counts]
     return local_map
 
-
-def bilinear_interpolate_block_value(
-        grid_2d: np.ndarray,
-        row_f: float,
-        col_f: float
-) -> float:
+def vectorized_bilinear_interpolation(grid, row_fs, col_fs):
     """
-    Weighted bilinear interpolation from (row_f, col_f) in an (M, N) grid.
+Perform bilinear interpolation for multiple points (row_fs, col_fs)
+at once on a 2D grid.
     """
-    M, N = grid_2d.shape
+    M, N = grid.shape
+    row_fs = np.clip(row_fs, 0, M - 1)
+    col_fs = np.clip(col_fs, 0, N - 1)
 
-    # clamp fractional coords
-    row_f = max(0, min(row_f, M-1))
-    col_f = max(0, min(col_f, N-1))
+    row0 = np.floor(row_fs).astype(int)
+    col0 = np.floor(col_fs).astype(int)
+    row1 = np.clip(row0 + 1, 0, M - 1)
+    col1 = np.clip(col0 + 1, 0, N - 1)
 
-    row0 = int(np.floor(row_f))
-    col0 = int(np.floor(col_f))
-    row1 = min(row0+1, M-1)
-    col1 = min(col0+1, N-1)
+    fr = row_fs - row0
+    fc = col_fs - col0
 
-    fr = row_f - row0
-    fc = col_f - col0
+    val00 = grid[row0, col0]
+    val01 = grid[row0, col1]
+    val10 = grid[row1, col0]
+    val11 = grid[row1, col1]
 
-    val00 = grid_2d[row0, col0]
-    val01 = grid_2d[row0, col1]
-    val10 = grid_2d[row1, col0]
-    val11 = grid_2d[row1, col1]
-
-    # treat NaNs as 0
-    if np.isnan(val00): val00 = 0
-    if np.isnan(val01): val01 = 0
-    if np.isnan(val10): val10 = 0
-    if np.isnan(val11): val11 = 0
-
-    val0 = val00*(1-fc) + val01*fc
-    val1 = val10*(1-fc) + val11*fc
-    return val0*(1-fr) + val1*fr
-
+    val0 = val00 * (1 - fc) + val01 * fc
+    val1 = val10 * (1 - fc) + val11 * fc
+    return val0 * (1 - fr) + val1 * fr
 
 ##############################################################################
 # apply_local_correction: WITH GAMMA BOUNDS
@@ -345,11 +327,13 @@ def apply_local_correction(
         gamma_bounds: Optional[Tuple[float, float]] = None
 ):
     """
-    Applies the paper's local correction:
+    Applies the local correction (paper’s formula):
+        P_res(x,y) = ( P_in(x,y) ^ ( log(M_ref(x,y)) / log(M_in(x,y)) ) )
+                     * alpha
 
-      P_res(x,y) = alpha * [ P_in(x,y) ]^( log(M_ref(x,y)) / log(M_in(x,y)) )
-
-    with optional floor_value clamping and optional gamma_bounds clamping.
+    plus two modifications:
+      1) We set output to NoData if M_ref or M_in is invalid.
+      2) We do the multiply-by-alpha step explicitly at the end.
 
     Args:
         image_path (str): path to input image
@@ -357,14 +341,11 @@ def apply_local_correction(
         ref_map (np.ndarray): reference distribution map, shape (M,N,num_bands)
         local_map (np.ndarray): local distribution map, shape (M,N,num_bands)
         output_path (str): path to write the corrected image
-        floor_value (float or None): if not None, clamp Mref, Min, P_in above this
+        floor_value (float or None): if not None, clamp M_ref, M_in, and P_in above this
         nodata_value (float): NoData for the input image
-        alpha (float): ratio to convert to 0–1 (the paper’s alpha)
+        alpha (float): final scaling factor to restore original scale
         gamma_bounds (tuple or None): if given, (low, high) clamp for gamma
     """
-    from osgeo import gdal
-    from math import log
-
     x_min, y_min, x_max, y_max = bounding_rect
     M, N, num_bands = ref_map.shape
 
@@ -393,17 +374,17 @@ def apply_local_correction(
         nX = ds_in.RasterXSize
         nY = ds_in.RasterYSize
         gt = ds_in.GetGeoTransform()
-        col_index = np.arange(nX)
-        row_index = np.arange(nY)
-        Xgeo = gt[0] + (col_index + 0.5)*gt[1]
-        Ygeo = gt[3] + (row_index + 0.5)*gt[5]
+        col_index = np.arange(nX) + 0.5
+        row_index = np.arange(nY) + 0.5
+        Xgeo = gt[0] + (col_index * gt[1])
+        Ygeo = gt[3] + (row_index * gt[5])
         Xgeo_2d, Ygeo_2d = np.meshgrid(Xgeo, Ygeo)
 
         arr_out = np.full_like(arr_in, nodata_value, dtype=np.float32)
         valid_mask = (arr_in != nodata_value)
         valid_inds = np.where(valid_mask)
 
-        px_vals = arr_in[valid_inds]  # P_in(x,y)
+        px_vals = arr_in[valid_inds]   # P_in(x,y)
         px_x    = Xgeo_2d[valid_inds]
         px_y    = Ygeo_2d[valid_inds]
 
@@ -413,36 +394,43 @@ def apply_local_correction(
         ref_band_2d = ref_map[:, :, b]
         loc_band_2d = local_map[:, :, b]
 
-        out_vals = []
-        for rf, cf, val_in in zip(row_fs, col_fs, px_vals):
-            # Interpolate from the reference distribution map
-            Mref = bilinear_interpolate_block_value(ref_band_2d, rf, cf)
-            # Interpolate from the local distribution map
-            Min  = bilinear_interpolate_block_value(loc_band_2d, rf, cf)
+        # Interpolate M_ref, M_in at each pixel
+        Mrefs = vectorized_bilinear_interpolation(ref_band_2d, row_fs, col_fs)
+        Mins  = vectorized_bilinear_interpolation(loc_band_2d, row_fs, col_fs)
 
-            # If floor_value is given, clamp below that
-            if floor_value is not None:
-                val_in = max(val_in, floor_value)
-                Mref   = max(Mref,   floor_value)
-                Min    = max(Min,    floor_value)
+        # Floor clamp if requested
+        if floor_value is not None:
+            px_vals = np.maximum(px_vals, floor_value)
+            Mrefs   = np.maximum(Mrefs,   floor_value)
+            Mins    = np.maximum(Mins,    floor_value)
 
-            # Compute gamma
-            gamma_raw = 0.0
-            # avoid log(0) or negative logs
-            if Mref <= 0 or Min <= 0 or val_in <= 0:
-                # fallback: do not transform
-                print('error negative or 0 went into log function')
-            else:
-                gamma_raw = log(Mref) / log(Min) # Calculate gamma_raw
+        # Identify pixels with valid Mrefs, Mins, px_vals
+        valid_gamma_mask = (Mrefs > 0) & (Mins > 0) & (px_vals > 0)
 
-                # If gamma_bounds is provided, clamp gamma
-                if gamma_bounds is not None:
-                    low, high = gamma_bounds
-                    gamma_raw = max(low, min(gamma_raw, high))
+        # Compute gamma, but skip invalid pixels
+        gamma_raw = np.zeros_like(px_vals, dtype=np.float32)
+        valid_logs = valid_gamma_mask.copy()
+        gamma_raw[valid_logs] = np.log(Mrefs[valid_logs]) / np.log(Mins[valid_logs])
 
-                out_val = alpha * (val_in ** gamma_raw) # Calculate P_res = alpha * P_in^gamma
+        # Apply gamma bounds if provided
+        if gamma_bounds is not None:
+            low, high = gamma_bounds
+            gamma_raw = np.clip(gamma_raw, low, high)
 
-            out_vals.append(out_val)
+        # UPDATED HERE: Move alpha multiplication to a final step
+        # 1) Exponent step
+        out_vals = np.copy(px_vals)
+        out_vals[valid_logs] = (px_vals[valid_logs] ** gamma_raw[valid_logs])
+
+        # 2) If M_ref or M_in is invalid, set to NoData
+        #    (catches cases where the block is partially covered or sums were 0)
+        invalid_logs = ~valid_logs
+        out_vals[invalid_logs] = nodata_value
+
+        # 3) UPDATED HERE: multiply by alpha explicitly at the end
+        #    This will “bring values back to their original scale”
+        #    if alpha was used as your desired overall scale factor.
+        out_vals[valid_logs] *= alpha
 
         arr_out[valid_inds] = out_vals
         out_band = out_ds.GetRasterBand(b+1)
@@ -452,7 +440,6 @@ def apply_local_correction(
     ds_in = None
     out_ds.FlushCache()
     out_ds = None
-
 
 ##############################################################################
 # MAIN FUNCTION: Now accepts gamma_bounds
@@ -471,15 +458,14 @@ def process_local_histogram_matching(
 ):
     """
     Local histogram matching with EXACT math from the paper, plus:
-    - optional floor_value to clamp negative/zero
-    - optional gamma_bounds to clamp the exponent range
-
-    P_res(x,y) = alpha * [P_in(x,y)]^( log(M_ref(x,y)) / log(M_in(x,y)) )
+      - optional floor_value to clamp negative/zero
+      - optional gamma_bounds to clamp the exponent range
+      - an explicit alpha multiplication step at the end (if desired)
 
     Steps:
       1) bounding rectangle
       2) mosaic-level coeff of variation
-      3) compute (M,N) block layout
+      3) compute (M, N) block layout
       4) compute reference distribution map
       5) for each image, compute local map
       6) apply correction
@@ -519,7 +505,7 @@ def process_local_histogram_matching(
         nodata_value=global_nodata_value
     )
 
-    # 5) For each image, do local distribution -> apply correction
+    # 5) For each image, compute local map and appxly correction
     corrected_paths = []
     for img_path in input_image_paths_array_local:
         loc_map = compute_local_distribution_map(
