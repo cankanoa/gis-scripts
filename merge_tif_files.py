@@ -1,26 +1,62 @@
+# Convert paths to WSL format
+input_directory_path = "/Users/kanoalindiwe/Downloads/temp/tempBounds/raster/merge"
+output_name = "merge.tif"
+
 import os
 from osgeo import gdal
+def merge_rasters(input_directory_path, output_name):
+    """
+    Merges all rasters in the input directory and applies nodata values and datatype.
 
-# Convert paths to WSL format
-input_folder = "/mnt/x/Imagery/Lidar/Big_Island/lidar/DEM"
-output_folder = "/mnt/x/Imagery/Lidar/Big_Island/lidar"
-output_file = os.path.join(output_folder, "merged_output2.tif")
+    Parameters:
+    - input_directory_path (str): Path to the directory containing input rasters.
+    - output_name (str): Name of the output merged raster.
 
-# Find all .tif files in the input directory and verify their existence
-tif_files = [os.path.join(input_folder, f) for f in os.listdir(input_folder) if f.endswith('.tif')]
-tif_files = [f for f in tif_files if os.path.exists(f)]
+    Returns:
+    - str: Path to the output raster.
+    """
+    # Get all raster file paths in the input directory
+    raster_files = [
+        os.path.join(input_directory_path, f)
+        for f in os.listdir(input_directory_path)
+        if f.endswith(('.tif', '.tiff'))
+    ]
 
-if not tif_files:
-    raise FileNotFoundError("No .tif files found in the input directory.")
+    if not raster_files:
+        raise FileNotFoundError("No raster files found in the specified directory.")
 
-# Create a virtual raster (VRT) to handle merging
-vrt_file = os.path.join(output_folder, "temp_merged.vrt")
-gdal.BuildVRT(vrt_file, tif_files)
+    # Full path for the output raster
+    output_path = os.path.join(input_directory_path, output_name)
 
-# Translate the VRT to a single output .tif file in ENVI format
-gdal.Translate(output_file, vrt_file, format='ENVI')
+    # Open input rasters to gather metadata
+    input_rasters = [gdal.Open(raster) for raster in raster_files]
+    nodata_values = [raster.GetRasterBand(1).GetNoDataValue() for raster in input_rasters]
+    datatypes = [raster.GetRasterBand(1).DataType for raster in input_rasters]
 
-# Clean up the temporary VRT file
-os.remove(vrt_file)
+    # Determine the common nodata value (assuming the first as default)
+    common_nodata = nodata_values[0]
 
-print(f"Merging completed. Output saved at: {output_file}")
+    # Determine the common datatype (assuming the first as default)
+    common_datatype = datatypes[0]
+
+    # Close input rasters
+    for raster in input_rasters:
+        raster = None
+
+
+    # Build the gdal_merge command
+    merge_command = [
+        "gdal_merge.py",
+        "-o", output_path,
+        "-n", str(common_nodata),
+        "-a_nodata", str(common_nodata),
+        "-ot", gdal.GetDataTypeName(common_datatype)
+    ] + raster_files
+
+    # Execute the merge command
+    gdal_merge_command = " ".join(merge_command)
+    os.system(gdal_merge_command)
+
+    return output_path
+
+merge_rasters(input_directory_path, output_name)
