@@ -1,0 +1,11 @@
+The DCNN model used in this study is a machine learning classifier,
+meaning results vary from run to run. Thus, results will not be 
+entirely replicable compared to those published in the accompanying
+manuscript. 
+
+Moreover, the code associated with the original study that this 
+manuscript is based off of (Coffer et al., 2020, Rem. Sens. Environ.)
+used IDL programming while the supplemental material included with 
+this manuscript used open-source Python programming in an effort to 
+increase accessibility. Therefore, differences also exist due to 
+the different computer programs used. 

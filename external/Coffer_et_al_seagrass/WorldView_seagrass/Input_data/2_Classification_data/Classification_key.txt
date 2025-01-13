@@ -1,0 +1,9 @@
+Classification key for Back Sound, NC, example 
+
+1 = Seagrass
+2 = Shallow water
+3 = Deep water
+4 = Turbid water
+5 = CDOM sand 
+6 = Submerged sand
+7 = Land 

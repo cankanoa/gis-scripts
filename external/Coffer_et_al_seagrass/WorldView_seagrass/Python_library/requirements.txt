@@ -1,0 +1,9 @@
+--index-url https://pypi.python.org/simple/
+
+tensorflow==2.1.0
+keras==2.2.4
+matplotlib==3.5.0
+pandas==1.1.5
+h5py==2.10.0
+numpy>=1.20.0
+C:/Users/PWHITMAN/Documents/For_Megan/WorldView_seagrass/Python_library/library_whl_files/GDAL-3.4.2-cp37-cp37m-win_amd64.whl
